@@ -1,3 +1,34 @@
+"""
+ANCS Mirror (Python)
+
+A minimal Bluetooth LE ANCS (Apple Notification Center Service) client for Linux/Raspberry Pi
+using the Bleak library. It connects to a paired iPhone, subscribes to notification streams,
+and prints readable summaries (title/message) for new notifications.
+
+Prerequisites
+- Python 3.9+
+- Linux with BlueZ (e.g., Raspberry Pi OS). Ensure BLE is enabled.
+- Bleak:    pip install bleak
+- Pairing:  Put iPhone near the Pi. The Pi (as BLE central) will connect and iOS should prompt to pair.
+            Accept the pairing request. If you don’t see notifications, unpair/retry.
+- Permissions: On some systems you may need to run with sudo or grant BLE capabilities.
+
+Usage
+- Scan and auto-connect to the first device advertising ANCS:
+    python ancs_mirror.py
+
+- Connect to a specific device by Bluetooth MAC address:
+    python ancs_mirror.py --address XX:XX:XX:XX:XX:XX
+
+Notes
+- This script focuses on printing concise summaries to stdout. Integrate your own display logic
+  (e.g., driving an e-paper or HDMI display) where indicated below.
+- iOS exposes ANCS when bonded. Make sure the device remains paired.
+
+References
+- ANCS UUIDs and packet formats are based on Apple’s public ANCS specification.
+"""
+
 import asyncio
 import argparse
 import sys
@@ -5,6 +36,41 @@ from dataclasses import dataclass
 from typing import Dict, Optional
 
 from bleak import BleakScanner, BleakClient
+
+import os
+import json
+
+# Simple config file to remember the iPhone MAC address
+CONFIG_FILE = os.path.expanduser("~/.ancs_mirror.json")
+
+def load_saved_address() -> Optional[str]:
+    try:
+        with open(CONFIG_FILE, "r") as f:
+            data = json.load(f)
+        addr = data.get("address")
+        if isinstance(addr, str) and addr:
+            return addr
+    except Exception:
+        pass
+    return None
+
+
+def save_address(address: str) -> None:
+    try:
+        with open(CONFIG_FILE, "w") as f:
+            json.dump({"address": address}, f)
+        print(f"[cfg] Saved address to {CONFIG_FILE}")
+    except Exception as e:
+        print(f"[cfg] Failed to save address: {e}")
+
+
+def clear_saved_address() -> None:
+    try:
+        if os.path.exists(CONFIG_FILE):
+            os.remove(CONFIG_FILE)
+            print(f"[cfg] Cleared saved address at {CONFIG_FILE}")
+    except Exception as e:
+        print(f"[cfg] Failed to clear saved address: {e}")
 
 # ANCS UUIDs
 ANCS_SERVICE_UUID = "7905F431-B5CE-4E99-A40F-4B1E122D00D0"
@@ -58,8 +124,9 @@ class PendingRequest:
 
 
 class ANCSMirror:
-    def __init__(self, address: Optional[str] = None):
+    def __init__(self, address: Optional[str] = None, remember: bool = False):
         self.address = address
+        self.remember = remember
         self.client: Optional[BleakClient] = None
         self.pending: Dict[int, PendingRequest] = {}
 
@@ -87,6 +154,10 @@ class ANCSMirror:
         if not await self.client.is_connected():
             raise RuntimeError("Failed to connect to device.")
         print("[ble] Connected.")
+
+        # Optionally remember the address for future runs
+        if self.remember:
+            save_address(addr)
 
         # Ensure service is present
         services = await self.client.get_services()
@@ -227,9 +298,20 @@ class ANCSMirror:
 async def main():
     parser = argparse.ArgumentParser(description="ANCS Mirror (Bleak)")
     parser.add_argument("--address", help="Bluetooth MAC address of the iPhone (optional)")
+    parser.add_argument("--remember-address", action="store_true", help="Save the connected device address for future runs")
+    parser.add_argument("--forget-address", action="store_true", help="Clear any saved address before connecting")
     args = parser.parse_args()
 
-    mirror = ANCSMirror(address=args.address)
+    # Handle config: forget if requested, otherwise try to use saved address
+    if args.forget_address:
+        clear_saved_address()
+
+    saved_addr = load_saved_address()
+    effective_address = args.address or saved_addr
+    if saved_addr and not args.address:
+        print(f"[cfg] Using saved address {saved_addr}")
+
+    mirror = ANCSMirror(address=effective_address, remember=args.remember_address)
     await mirror.run()
 
 
@@ -237,3 +319,4 @@ if __name__ == "__main__":
     if sys.platform not in ("linux", "linux2"):
         print("[warn] This script is intended for Linux/BlueZ (e.g., Raspberry Pi). Bleak on macOS/Windows cannot act as a BLE central for ANCS to an iPhone.")
     asyncio.run(main())
+
