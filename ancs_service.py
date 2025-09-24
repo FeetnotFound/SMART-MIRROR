@@ -151,7 +151,7 @@ class ANCSMirror:
         print(f"[ble] Connecting to {addr} ...")
         self.client = BleakClient(addr)
         await self.client.connect()
-        if not await self.client.is_connected():
+        if not self.client.is_connected:
             raise RuntimeError("Failed to connect to device.")
         print("[ble] Connected.")
 
