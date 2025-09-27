@@ -260,25 +260,87 @@ public final class MirrorConnectivityManager: NSObject, ObservableObject {
     }
 
     public func sendCalendar(rangeStart: Date, rangeEnd: Date, events: [CalendarEvent]) async {
-        // Minimal, stable payload for the Python bridge
-        struct OutEvent: Codable { let calendar: String; let event: String; let time: String; let location: String }
-        let fmt = DateFormatter()
-        fmt.locale = .current
-        fmt.timeStyle = .short
-
-        let outEvents: [OutEvent] = events.compactMap { ev in
-            guard let s = ev.startDate, let e = ev.endDate else { return nil }
-            let name = (ev.title ?? "Untitled").trimmingCharacters(in: .whitespacesAndNewlines)
-            let time = ev.isAllDay ? "All-day" : "\(fmt.string(from: s))–\(fmt.string(from: e))"
-            return OutEvent(
-                calendar: ev.calendar.title.isEmpty ? "Calendar" : ev.calendar.title,
-                event: name.isEmpty ? "Untitled" : name,
-                time: time,
-                location: (ev.location ?? "")
-            )
+        // Packet shape: { "YYYY-MM-DD": [ {event...}, ... ], ... }
+        struct OutEvent: Codable {
+            let calendar: String
+            let event: String
+            let time: String
+            let location: String
+            let isAllDay: Bool
         }
-        struct Payload: Codable { let rangeStart: Date; let rangeEnd: Date; let events: [OutEvent] }
-        let payload = Payload(rangeStart: rangeStart, rangeEnd: rangeEnd, events: outEvents)
+
+        let cal = Calendar.current
+
+        // Formatter for dictionary keys (stable, date-only)
+        let dayKeyFormatter = DateFormatter()
+        dayKeyFormatter.calendar = cal
+        dayKeyFormatter.locale = Locale(identifier: "en_US_POSIX")
+        dayKeyFormatter.timeZone = cal.timeZone
+        dayKeyFormatter.dateFormat = "yyyy-MM-dd"
+
+        // Formatter for human-readable time ranges
+        let timeFormatter = DateFormatter()
+        timeFormatter.locale = .current
+        timeFormatter.timeStyle = .short
+
+        let startOfRange = cal.startOfDay(for: rangeStart)
+        let endOfRangeDay = cal.startOfDay(for: rangeEnd)
+
+        // Initialize dictionary with each day in the range (inclusive)
+        var eventsByDate: [String: [OutEvent]] = [:]
+        var cursor = startOfRange
+        while cursor <= endOfRangeDay {
+            let key = dayKeyFormatter.string(from: cursor)
+            eventsByDate[key] = []
+            guard let next = cal.date(byAdding: .day, value: 1, to: cursor) else { break }
+            cursor = next
+        }
+
+        // Place each event into every day it intersects within the range
+        for ev in events {
+            guard let s = ev.startDate, let e = ev.endDate else { continue }
+
+            let name = (ev.title ?? "Untitled").trimmingCharacters(in: .whitespacesAndNewlines)
+            let displayName = name.isEmpty ? "Untitled" : name
+            let calendarTitle = ev.calendar.title.isEmpty ? "Calendar" : ev.calendar.title
+            let timeString: String = ev.isAllDay ? "All-day" : "\(timeFormatter.string(from: s))–\(timeFormatter.string(from: e))"
+            let out = OutEvent(
+                calendar: calendarTitle,
+                event: displayName,
+                time: timeString,
+                location: (ev.location ?? ""),
+                isAllDay: ev.isAllDay
+            )
+
+            var day = cal.startOfDay(for: max(s, startOfRange))
+            let lastDay = endOfRangeDay
+            while day <= lastDay {
+                guard let nextDay = cal.date(byAdding: .day, value: 1, to: day) else { break }
+                // Check intersection between [s, e) and [day, nextDay)
+                if e <= day { break }            // event ended before this day
+                if s >= nextDay {                // event starts after this day
+                    day = nextDay
+                    continue
+                }
+                // Intersects this day -> append
+                let key = dayKeyFormatter.string(from: day)
+                eventsByDate[key, default: []].append(out)
+                day = nextDay
+            }
+        }
+
+        struct CalendarUpdatePayload: Codable {
+            let rangeStart: String
+            let rangeEnd: String
+            let eventsByDate: [String: [OutEvent]]
+        }
+
+        let payload = CalendarUpdatePayload(
+            rangeStart: dayKeyFormatter.string(from: startOfRange),
+            rangeEnd: dayKeyFormatter.string(from: endOfRangeDay),
+            eventsByDate: eventsByDate
+        )
+
         let url = restBaseURL.appendingPathComponent("calendarUpdate")
         await postJSON(url: url, body: payload)
     }
@@ -329,13 +391,16 @@ public final class MirrorManager {
     private let nowPlayingQueue = NowPlayingSendQueue()
     private var lastRESTNowPlaying: NowPlayingInfo?
     private var lastRESTSendDate: Date?
+    private var dailyCalendarTask: Task<Void, Never>?
+    private var lastIsPlayingForWS: Bool?
 
     private(set) var connectivity: MirrorConnectivityManager?
     @Published public private(set) var lastNowPlaying: NowPlayingInfo?
 
     private init() {}
+    public typealias DailyCalendarProvider = () async -> (rangeStart: Date, rangeEnd: Date, events: [CalendarEvent])
     // Wrapper to emit a Codable WS message for now playing
-    private struct NowPlayingMessage: Codable {
+    private struct NowPlayingMessage: Encodable {
         let type: String = "nowPlaying"
         let payload: NowPlayingInfo
     }
@@ -366,15 +431,33 @@ public final class MirrorManager {
     }
 
     private func _sendNowPlayingInternal(_ info: NowPlayingInfo) async {
+        print("[NowPlaying] Preparing send: isPlaying=\(info.isPlaying), title=\(info.title), artist=\(info.artist)")
         guard let conn = await ensureConnectivityIfPossible() else { return }
         // Throttle REST: send on track change, play/pause change, or every 10s
         if shouldSendREST(for: info) {
+            print("[NowPlaying][REST] Sending nowPlaying payload")
             await conn.sendNowPlaying(info)
             lastRESTNowPlaying = info
             lastRESTSendDate = Date()
         }
-        // Always send WebSocket at 1 Hz with the same snapshot
+        // Send WebSocket update; on play/pause change, send one extra packet.
+        // Also treat the first "playing" state as a change to ensure a duplicate on playback start.
+        let playPauseChanged: Bool = {
+            if let last = lastIsPlayingForWS {
+                return last != info.isPlaying
+            } else {
+                return info.isPlaying
+            }
+        }()
+        print("[NowPlaying][WS] Sending nowPlaying payload (duplicate=\(playPauseChanged))")
         await conn.sendJSONMessage(type: "nowPlaying", payload: info)
+        if playPauseChanged {
+            // Small delay to help receivers that debounce identical messages
+            try? await Task.sleep(nanoseconds: 150_000_000)
+            await conn.sendJSONMessage(type: "nowPlaying", payload: info)
+        }
+        lastIsPlayingForWS = info.isPlaying
+        print("[NowPlaying] State updated: lastIsPlayingForWS=\(String(describing: lastIsPlayingForWS))")
     }
 
     public func adopt(_ manager: MirrorConnectivityManager) {
@@ -395,6 +478,10 @@ public final class MirrorManager {
 
     public func updateNowPlaying(_ info: NowPlayingInfo) {
         self.lastNowPlaying = info
+        // Also send this snapshot so play/pause transitions propagate immediately
+        Task { [weak self] in
+            await self?.sendNowPlaying(info)
+        }
     }
 
     public func sendNowPlaying(_ info: NowPlayingInfo) async {
@@ -407,6 +494,41 @@ public final class MirrorManager {
     public func sendCalendar(rangeStart: Date, rangeEnd: Date, events: [CalendarEvent]) async {
         guard let conn = await ensureConnectivityIfPossible() else { return }
         await conn.sendCalendar(rangeStart: rangeStart, rangeEnd: rangeEnd, events: events)
+    }
+
+    /// Starts a repeating task that sends a calendar snapshot once per day (at local midnight).
+    /// Provide a closure that returns the desired range and events to send.
+    public func startDailyCalendarUpdates(provider: @escaping DailyCalendarProvider) {
+        // Cancel any existing task
+        dailyCalendarTask?.cancel()
+        dailyCalendarTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled {
+                // Fetch the snapshot and send it
+                let snapshot = await provider()
+                await self.sendCalendar(rangeStart: snapshot.rangeStart, rangeEnd: snapshot.rangeEnd, events: snapshot.events)
+
+                // Sleep until next local midnight
+                let cal = Calendar.current
+                let now = Date()
+                let nextMidnight = cal.nextDate(after: now,
+                                                matching: DateComponents(hour: 0, minute: 0, second: 0),
+                                                matchingPolicy: .nextTimePreservingSmallerComponents)
+                                   ?? now.addingTimeInterval(86_400)
+                let interval = max(1, nextMidnight.timeIntervalSince(now))
+                do {
+                    try await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+                } catch {
+                    break
+                }
+            }
+        }
+    }
+
+    /// Stops the repeating daily calendar updates task, if running.
+    public func stopDailyCalendarUpdates() {
+        dailyCalendarTask?.cancel()
+        dailyCalendarTask = nil
     }
 
     public func sendControlEvent(_ event: ControlEvent) async {
@@ -461,12 +583,15 @@ public final class MirrorDiscoveryController: NSObject, ObservableObject {
         super.init()
         browser.delegate = self
         browser.includesPeerToPeer = true
+    }
+
+    public func start() {
         browser.searchForServices(ofType: serviceType, inDomain: domain)
         print("[Bonjour] Searching for services of type \(serviceType) in \(domain)")
     }
 }
 
-extension MirrorDiscoveryController: NetServiceBrowserDelegate {
+extension MirrorDiscoveryController: @MainActor NetServiceBrowserDelegate {
     public func netServiceBrowser(_ browser: NetServiceBrowser, didFind service: NetService, moreComing: Bool) {
         print("[Bonjour] Found service: \(service.name)")
         services.append(service)
@@ -502,7 +627,7 @@ extension MirrorDiscoveryController: NetServiceBrowserDelegate {
     }
 }
 
-extension MirrorDiscoveryController: NetServiceDelegate {
+extension MirrorDiscoveryController: @MainActor NetServiceDelegate {
     public func netServiceDidResolveAddress(_ sender: NetService) {
         resolveAttempts[ObjectIdentifier(sender)] = nil
         defer { sender.stop() }

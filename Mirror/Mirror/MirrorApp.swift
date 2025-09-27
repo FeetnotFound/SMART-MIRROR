@@ -19,7 +19,10 @@ struct MirrorApp: App {
     private func performInitialLoad() async {
         // TODO: Replace this simulated delay with real startup work (e.g., data load, auth refresh)
         try? await Task.sleep(nanoseconds: 800_000_000)
-        await MainActor.run { isLoaded = true }
+        await MainActor.run {
+            isLoaded = true
+            discoveryHolder.startDiscovery()
+        }
     }
 
     var body: some Scene {
@@ -89,6 +92,10 @@ final class DiscoveryHolder: ObservableObject {
                 }
                 .store(in: &self.cancellables)
         }
+    }
+    
+    func startDiscovery() {
+        controller.start()
     }
 }
 

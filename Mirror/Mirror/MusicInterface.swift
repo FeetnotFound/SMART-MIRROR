@@ -8,6 +8,7 @@ struct MusicInterface: View {
     @State private var systemNowPlaying = SystemNowPlaying()
     @State private var tickTimer: Timer? = nil
     @State private var isArtworkExpanded: Bool = false
+    @State private var lastSentTrackID: String? = nil
 
     var body: some View {
         VStack(spacing: 24) {
@@ -222,14 +223,6 @@ struct MusicInterface: View {
             }
             // Pull fresh info (some apps update the center every second)
             refreshNowPlaying()
-
-            // While music is playing, send a now-playing packet each second
-            if systemNowPlaying.isPlaying, let payload = buildNowPlayingPayload() {
-                Task { @MainActor in
-                    MirrorManager.shared.updateNowPlaying(payload)
-                    await MirrorManager.shared.sendNowPlaying(payload)
-                }
-            }
         }
     }
 
@@ -251,13 +244,37 @@ struct MusicInterface: View {
         let player = MPMusicPlayerController.systemMusicPlayer
         player.beginGeneratingPlaybackNotifications()
         NotificationCenter.default.addObserver(forName: .MPMusicPlayerControllerPlaybackStateDidChange, object: player, queue: .main) { _ in
+            // Capture prior state, update, then compare so we only send when it flips
+            let wasPlaying = systemNowPlaying.isPlaying
             updateFromMusicPlayer()
+            let isNowPlaying = systemNowPlaying.isPlaying
+            if wasPlaying != isNowPlaying, let payload = buildNowPlayingPayload() {
+                Task { @MainActor in
+                    MirrorManager.shared.updateNowPlaying(payload)
+                    await MirrorManager.shared.sendNowPlaying(payload)
+                }
+            }
         }
         NotificationCenter.default.addObserver(forName: .MPMusicPlayerControllerNowPlayingItemDidChange, object: player, queue: .main) { _ in
             updateFromMusicPlayer()
+            // Send once at the beginning of a new song
+            if let id = currentTrackID(), id != lastSentTrackID, let payload = buildNowPlayingPayload() {
+                lastSentTrackID = id
+                Task { @MainActor in
+                    MirrorManager.shared.updateNowPlaying(payload)
+                    await MirrorManager.shared.sendNowPlaying(payload)
+                }
+            }
         }
         // Initial sync from the player
         updateFromMusicPlayer()
+        if let id = currentTrackID(), id != lastSentTrackID, let payload = buildNowPlayingPayload() {
+            lastSentTrackID = id
+            Task { @MainActor in
+                MirrorManager.shared.updateNowPlaying(payload)
+                await MirrorManager.shared.sendNowPlaying(payload)
+            }
+        }
     }
 
     private func removeMusicPlayerObservers() {
@@ -269,23 +286,14 @@ struct MusicInterface: View {
 
     private func togglePlayPause() {
         let player = MPMusicPlayerController.systemMusicPlayer
-        let willPlay: Bool
         switch player.playbackState {
         case .playing:
             player.pause()
-            willPlay = false
         default:
             player.play()
-            willPlay = true
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
             refreshNowPlaying()
-            if willPlay, let payload = buildNowPlayingPayload() {
-                Task { @MainActor in
-                    MirrorManager.shared.updateNowPlaying(payload)
-                    await MirrorManager.shared.sendNowPlaying(payload)
-                }
-            }
         }
     }
 
@@ -298,7 +306,6 @@ struct MusicInterface: View {
 
     private func sendRemote(_ command: RemoteCommand) {
         let player = MPMusicPlayerController.systemMusicPlayer
-        var didRequestPlay = false
         switch command {
         case .previous:
             player.skipToPreviousItem()
@@ -306,19 +313,12 @@ struct MusicInterface: View {
             player.skipToNextItem()
         case .play:
             player.play()
-            didRequestPlay = true
         case .pause:
             player.pause()
         }
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
             refreshNowPlaying()
-            if didRequestPlay, let payload = buildNowPlayingPayload() {
-                Task { @MainActor in
-                    MirrorManager.shared.updateNowPlaying(payload)
-                    await MirrorManager.shared.sendNowPlaying(payload)
-                }
-            }
         }
     }
 
@@ -337,6 +337,14 @@ struct MusicInterface: View {
         let position = systemNowPlaying.elapsed ?? 0
         let isPlaying = systemNowPlaying.isPlaying
         return NowPlayingInfo(title: title, artist: artist, album: album, duration: duration, position: position, isPlaying: isPlaying)
+    }
+
+    private func currentTrackID() -> String? {
+        guard let title = systemNowPlaying.title, !title.isEmpty else { return nil }
+        let artist = systemNowPlaying.artist ?? ""
+        let album = systemNowPlaying.album ?? ""
+        let duration = systemNowPlaying.duration ?? 0
+        return "\(title)|\(artist)|\(album)|\(duration)"
     }
 }
 
@@ -372,3 +380,4 @@ private struct SystemNowPlaying {
     MusicInterface()
 }
 #endif
+

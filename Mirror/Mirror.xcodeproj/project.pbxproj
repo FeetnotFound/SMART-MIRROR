@@ -23,6 +23,7 @@
 		E4CB4A0A2E87664C00AA846F /* MirrorConnectivity 2.swift in Sources */ = {isa = PBXBuildFile; fileRef = E4CB4A092E87664C00AA846F /* MirrorConnectivity 2.swift */; };
 		E4CB4A0C2E87771800AA846F /* MediaRemoteListener.swift in Sources */ = {isa = PBXBuildFile; fileRef = E4CB4A0B2E87771800AA846F /* MediaRemoteListener.swift */; };
 		E4CB4A0E2E877B1200AA846F /* SystemMediaController.swift in Sources */ = {isa = PBXBuildFile; fileRef = E4CB4A0D2E877B1200AA846F /* SystemMediaController.swift */; };
+		E4CB4A102E88883900AA846F /* __tool_request_for_project_context.md in Resources */ = {isa = PBXBuildFile; fileRef = E4CB4A0F2E88883900AA846F /* __tool_request_for_project_context.md */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -63,6 +64,7 @@
 		E4CB4A092E87664C00AA846F /* MirrorConnectivity 2.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "MirrorConnectivity 2.swift"; sourceTree = "<group>"; };
 		E4CB4A0B2E87771800AA846F /* MediaRemoteListener.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaRemoteListener.swift; sourceTree = "<group>"; };
 		E4CB4A0D2E877B1200AA846F /* SystemMediaController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemMediaController.swift; sourceTree = "<group>"; };
+		E4CB4A0F2E88883900AA846F /* __tool_request_for_project_context.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = __tool_request_for_project_context.md; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -127,6 +129,7 @@
 				E4CB4A092E87664C00AA846F /* MirrorConnectivity 2.swift */,
 				E4CB4A0B2E87771800AA846F /* MediaRemoteListener.swift */,
 				E4CB4A0D2E877B1200AA846F /* SystemMediaController.swift */,
+				E4CB4A0F2E88883900AA846F /* __tool_request_for_project_context.md */,
 			);
 			path = Mirror;
 			sourceTree = "<group>";
@@ -260,6 +263,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				E4CB4A102E88883900AA846F /* __tool_request_for_project_context.md in Resources */,
 				E4305DB02E7EF47900ED7C65 /* Preview Assets.xcassets in Resources */,
 				E407A4CE2E80A34200A5E40B /* Info 3.plist in Resources */,
 				E4305DAD2E7EF47900ED7C65 /* Assets.xcassets in Resources */,
